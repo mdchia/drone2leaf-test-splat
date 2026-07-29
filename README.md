@@ -48,6 +48,24 @@ site/                   everything published to GitHub Pages
 - **Do not put the `.splat` in Git LFS.** GitHub Pages does not resolve LFS
   objects; it would serve the pointer file as text and the viewer would fail on
   130 bytes of ASCII. The deploy workflow checks for this explicitly.
+
+- **Do not switch back to `SPLAT.Loader.LoadAsync`.** When a response carries a
+  `content-length`, gsplat 1.2.3 preallocates `new Uint8Array(content-length)`
+  and streams the body into it. Pages serves this file with
+  `content-encoding: gzip` to anything that advertises it, so `content-length`
+  is the *compressed* size (29,273,441) while the reader yields *decompressed*
+  bytes (30,589,216) - the array overflows and `set()` throws
+  `RangeError: source array is too long`. The page fetches and assembles the
+  buffer itself, then calls `LoadFromArrayBuffer`, which is correct under any
+  transfer encoding.
+
+  The same trap invalidates any size or gaussian count derived from
+  `content-length`: it would report 914,795 gaussians instead of 955,913.
+
+  Worth knowing when verifying a deployment: **`curl` does not send
+  `Accept-Encoding` by default**, so it receives the file uncompressed and every
+  check passes while browsers still fail. Test with
+  `curl -H 'Accept-Encoding: gzip' -I` to see what a browser actually gets.
 - The viewer prefers `all_runs_lod.splat` if one is ever added and offers a
   quality toggle; with only the full model present it loads that directly.
 - Cache-busting keys off the file's content length, so replacing the `.splat`

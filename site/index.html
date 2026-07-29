@@ -105,22 +105,77 @@
             const fmt = (n) => n.toLocaleString("en-US");
             const mb = (b) => (b / 2 ** 20).toFixed(1);
 
+            // Fetch the model ourselves instead of using SPLAT.Loader.LoadAsync.
+            //
+            // gsplat 1.2.3's loader does, when the response carries a
+            // content-length:
+            //
+            //     const n = new Uint8Array(parseInt(headers["content-length"]));
+            //     ... n.set(chunk, offset) ...          // from body.getReader()
+            //
+            // GitHub Pages serves this file with `content-encoding: gzip` to any
+            // client that advertises it - i.e. every browser - so content-length
+            // is the COMPRESSED size (29,273,441) while the reader yields
+            // DECOMPRESSED bytes (30,589,216). The preallocated array overflows
+            // and set() throws `RangeError: source array is too long`.
+            //
+            // curl does not send Accept-Encoding by default, which is why the
+            // deployment verified clean over curl and still failed in a browser.
+            //
+            // Reading the stream ourselves and sizing the buffer from what
+            // actually arrived is correct under any transfer encoding, and it
+            // gives a true byte count - deriving one from a gzipped
+            // content-length would have reported 914,795 gaussians, not 955,913.
+            async function fetchSplat(url, onProgress) {
+                const res = await fetch(url, { cache: "default" });
+                if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+
+                // No decompressed-size header exists, so a percentage is only
+                // honest when the response is not re-encoded in transit.
+                const encoded = !!res.headers.get("content-encoding");
+                const declared = Number(res.headers.get("content-length") || 0);
+                const total = encoded ? 0 : declared;
+
+                if (!res.body || !res.body.getReader) {
+                    const buf = await res.arrayBuffer();
+                    onProgress(buf.byteLength, total);
+                    return new Uint8Array(buf);
+                }
+
+                const reader = res.body.getReader();
+                const chunks = [];
+                let received = 0;
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    chunks.push(value);
+                    received += value.length;
+                    onProgress(received, total);
+                }
+                const out = new Uint8Array(received);
+                let off = 0;
+                for (const c of chunks) { out.set(c, off); off += c.length; }
+                return out;
+            }
+
             async function main() {
                 let bytes = 0;
                 try {
-                    // Cache-bust on content length rather than a hand-edited
-                    // version number - a stale cache is exactly how you end up
-                    // convinced a re-upload did not take.
-                    const head = await fetch(file, { method: "HEAD" });
-                    bytes = Number(head.headers.get("content-length") || 0);
-                    const tag = bytes ? `?h=${bytes}` : "";
-                    const total = bytes ? ` of ${mb(bytes)} MB` : "";
-                    await SPLAT.Loader.LoadAsync(file + tag, scene, (p) => {
+                    const data = await fetchSplat(file, (got, total) => {
+                        const pct = total ? ` &mdash; ${Math.round((got / total) * 100)}%` : "";
                         hud.innerHTML =
                             `<b>Drone2Leaf</b> &mdash; greenhouse bay<br>` +
-                            `<span class="dim">loading ${mb(bytes * p)}${total} ` +
-                            `&mdash; ${Math.round(p * 100)}%</span>`;
+                            `<span class="dim">loading ${mb(got)} MB${pct}</span>`;
                     });
+                    bytes = data.byteLength;
+                    // A .splat is a headerless array of 32-byte records, so any
+                    // truncation or mangling shows up here rather than as a
+                    // confusing render.
+                    if (bytes === 0 || bytes % 32 !== 0) {
+                        throw new Error(`${bytes} bytes is not a whole number of ` +
+                                        `32-byte records - the file looks corrupt`);
+                    }
+                    SPLAT.Loader.LoadFromArrayBuffer(data.buffer, scene);
                 } catch (err) {
                     fail(`Could not load ${file}.<br>${err.message}`);
                     console.error(err);
