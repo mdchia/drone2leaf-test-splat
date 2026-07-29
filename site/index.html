@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+        <title>Drone2Leaf - greenhouse bay Gaussian splat</title>
+        <meta name="description" content="An interactive 3D Gaussian splat of a
+            greenhouse bay, reconstructed from 353 drone RGB frames flown in ten passes." />
+
+        <!-- Absolute URLs: this is a project site served from a subpath, and
+             link-preview crawlers do not resolve relative paths. -->
+        <meta property="og:type" content="website" />
+        <meta property="og:title" content="Drone2Leaf - greenhouse bay Gaussian splat" />
+        <meta property="og:description" content="Interactive 3D reconstruction from 353 drone frames. Drag to orbit." />
+        <meta property="og:image" content="https://mdchia.github.io/drone2leaf-test-splat/preview.jpg" />
+        <meta property="og:url" content="https://mdchia.github.io/drone2leaf-test-splat/" />
+        <meta name="twitter:card" content="summary_large_image" />
+
+        <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🌱</text></svg>" />
+
+        <style>
+            :root { color-scheme: dark; }
+            html, body { margin: 0; padding: 0; overflow: hidden; background: #0b0d0e; }
+            canvas { width: 100vw; height: 100dvh; display: block; touch-action: none; }
+
+            #hud {
+                position: absolute;
+                top: max(12px, env(safe-area-inset-top));
+                left: max(12px, env(safe-area-inset-left));
+                color: #e8eaed;
+                font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                background: rgba(8, 10, 12, 0.72);
+                border: 1px solid rgba(255, 255, 255, 0.09);
+                padding: 10px 13px;
+                border-radius: 7px;
+                /* Click-through so the panel never swallows an orbit drag; the
+                   interactive bits opt back in individually below. */
+                pointer-events: none;
+                user-select: none;
+                max-width: min(46ch, calc(100vw - 24px));
+                backdrop-filter: blur(6px);
+            }
+            #hud b { color: #8fd6a8; font-weight: 600; }
+            #hud .dim { color: #9aa3ab; }
+            #hud a, #hud summary { pointer-events: auto; cursor: pointer; }
+            #hud a { color: #8fd6a8; }
+            #hud details { margin-top: 7px; }
+            #hud summary {
+                color: #8fd6a8; list-style: none;
+                border-top: 1px solid rgba(255,255,255,0.10); padding-top: 7px;
+            }
+            #hud summary::-webkit-details-marker { display: none; }
+            #hud summary::before { content: "▸ "; }
+            #hud details[open] summary::before { content: "▾ "; }
+            #hud dl { margin: 7px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+            #hud dt { color: #9aa3ab; }
+            #hud dd { margin: 0; }
+            #err { color: #ff9d9d; }
+            @media (max-width: 480px) { #hud { font-size: 11.5px; padding: 8px 10px; } }
+        </style>
+    </head>
+    <body>
+        <canvas id="canvas"></canvas>
+        <div id="hud">Loading&hellip;</div>
+
+        <script type="module">
+            const hud = document.getElementById("hud");
+            const canvas = document.getElementById("canvas");
+
+            const fail = (msg) => { hud.innerHTML = `<span id="err">${msg}</span>`; };
+
+            // gsplat needs WebGL2. Without this check the failure surfaces as an
+            // opaque constructor error in the console and a blank black page.
+            if (!canvas.getContext("webgl2")) {
+                fail("This viewer needs WebGL2, which this browser has disabled or " +
+                     "does not support.<br>Try a recent Chrome, Firefox or Safari.");
+                throw new Error("no webgl2");
+            }
+
+            // Vendored locally so the page works without third-party requests;
+            // the CDN is only a fallback if that copy ever goes missing.
+            let SPLAT;
+            try {
+                SPLAT = await import("./gsplat-1.2.3.js");
+            } catch (e) {
+                SPLAT = await import("https://cdn.jsdelivr.net/npm/gsplat@1.2.3");
+            }
+
+            const params = new URLSearchParams(location.search);
+            const exists = async (u) => {
+                try { return (await fetch(u, { method: "HEAD" })).ok; } catch (e) { return false; }
+            };
+            const FULL = "all_runs.splat", LOD = "all_runs_lod.splat";
+            const hasLod = await exists(LOD);
+            const file = params.get("file") || (hasLod ? LOD : FULL);
+            const isLod = file === LOD;
+
+            const renderer = new SPLAT.WebGLRenderer(canvas);
+            const scene = new SPLAT.Scene();
+            const camera = new SPLAT.Camera();
+            const controls = new SPLAT.OrbitControls(camera, canvas);
+            controls.orbitSpeed = 0.5;
+            controls.zoomSpeed = 1.2;
+
+            const fmt = (n) => n.toLocaleString("en-US");
+            const mb = (b) => (b / 2 ** 20).toFixed(1);
+
+            async function main() {
+                let bytes = 0;
+                try {
+                    // Cache-bust on content length rather than a hand-edited
+                    // version number - a stale cache is exactly how you end up
+                    // convinced a re-upload did not take.
+                    const head = await fetch(file, { method: "HEAD" });
+                    bytes = Number(head.headers.get("content-length") || 0);
+                    const tag = bytes ? `?h=${bytes}` : "";
+                    const total = bytes ? ` of ${mb(bytes)} MB` : "";
+                    await SPLAT.Loader.LoadAsync(file + tag, scene, (p) => {
+                        hud.innerHTML =
+                            `<b>Drone2Leaf</b> &mdash; greenhouse bay<br>` +
+                            `<span class="dim">loading ${mb(bytes * p)}${total} ` +
+                            `&mdash; ${Math.round(p * 100)}%</span>`;
+                    });
+                } catch (err) {
+                    fail(`Could not load ${file}.<br>${err.message}`);
+                    console.error(err);
+                    return;
+                }
+
+                const count = Math.floor(bytes / 32);  // 32-byte records, no header
+                let frames = 0, fps = 0, last = performance.now();
+
+                // Build the panel ONCE and update only the stats line. Rewriting
+                // hud.innerHTML on every tick would slam the <details> shut twice
+                // a second the moment anyone opened it.
+                hud.innerHTML =
+                    `<b>Drone2Leaf</b> &mdash; greenhouse bay<br>` +
+                    `<span id="stats"></span>` +
+                    (hasLod
+                        ? ` &middot; <a href="?file=${isLod ? FULL : LOD}">` +
+                          `${isLod ? "full detail" : "fast view"}</a>`
+                        : "") +
+                    `<br><span class="dim">drag to orbit &middot; scroll to zoom ` +
+                    `&middot; right-drag to pan</span>` +
+                    `<details>` +
+                    `<summary>about this model</summary>` +
+                    `<dl>` +
+                    `<dt>source</dt><dd>353 RGB frames, DJI Mavic 3M</dd>` +
+                    `<dt>capture</dt><dd>10 passes, 3 gimbal pitches, 2 altitudes</dd>` +
+                    `<dt>pipeline</dt><dd>COLMAP SfM &rarr; nerfstudio splatfacto</dd>` +
+                    `<dt>trained</dt><dd>60k iterations at 1600 px</dd>` +
+                    `</dl>` +
+                    `<p class="dim" style="margin:7px 0 0">Foliage is soft by ` +
+                    `nature of the capture: two thirds of the reconstructed points ` +
+                    `were seen by only one flight pass, so there is limited ` +
+                    `multi-view support for the leaves. Rigid structure &mdash; ` +
+                    `floor, rails, glazing &mdash; is sharper.</p>` +
+                    `</details>`;
+                const stats = document.getElementById("stats");
+                const statLine = () =>
+                    `${fmt(count)} gaussians · ${mb(bytes)} MB · ${fps} fps`;
+                stats.textContent = statLine();
+
+                const render = () => {
+                    controls.update();
+                    renderer.render(scene, camera);
+                    frames++;
+                    const now = performance.now();
+                    if (now - last >= 500) {
+                        fps = Math.round((frames * 1000) / (now - last));
+                        frames = 0;
+                        last = now;
+                        stats.textContent = statLine();
+                    }
+                    requestAnimationFrame(render);
+                };
+
+                const resize = () => renderer.setSize(window.innerWidth, window.innerHeight);
+                window.addEventListener("resize", resize);
+                resize();
+                requestAnimationFrame(render);
+            }
+
+            main();
+        </script>
+    </body>
+</html>

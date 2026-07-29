@@ -1,0 +1,60 @@
+name: Deploy viewer to GitHub Pages
+
+# Pages for this repo is configured with build_type "workflow", so nothing is
+# published unless this runs. Everything under site/ is uploaded verbatim -
+# there is no build step, the viewer is plain HTML plus a vendored module.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it: the artifact is ~30 MB
+# and a half-uploaded replacement is worse than a slightly stale page.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sanity-check the payload
+        # Catches the two ways this silently ships something broken: a splat
+        # stored as a Git LFS pointer (Pages serves the pointer text, not the
+        # file, and the viewer fetches 130 bytes of ASCII), and a truncated
+        # upload (.splat is a headerless array of 32-byte records, so a valid
+        # file is always an exact multiple of 32).
+        run: |
+          set -euo pipefail
+          test -f site/index.html
+          test -f site/all_runs.splat
+          if head -c 40 site/all_runs.splat | grep -q "git-lfs"; then
+            echo "::error::all_runs.splat is a Git LFS pointer. Pages cannot resolve LFS - commit the binary directly."
+            exit 1
+          fi
+          bytes=$(stat -c%s site/all_runs.splat)
+          if [ $((bytes % 32)) -ne 0 ]; then
+            echo "::error::all_runs.splat is $bytes bytes, not a multiple of 32 - truncated?"
+            exit 1
+          fi
+          echo "all_runs.splat: $bytes bytes = $((bytes / 32)) gaussians"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
